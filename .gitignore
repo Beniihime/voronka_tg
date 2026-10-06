@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+data/images/
+dataset/images/
+dataset/annotations/
+google-service-account.json
+.env.example
+README.md
+voronka-510810-a2733be4f3ce.json
+__init__.py

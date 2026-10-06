@@ -1,0 +1,58 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: one_c_bot
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d one_c_bot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    build: .
+    env_file: .env
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  bot:
+    build: .
+    env_file: .env
+    command: ["python", "-m", "app.main"]
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config:ro
+      - ./secrets:/app/secrets:ro
+      # PaddleOCR 3 uses PaddleX cache; the legacy cache is also retained
+      # so a package downgrade does not re-download its models.
+      - paddlex_cache:/root/.paddlex
+      - paddleocr_cache:/root/.paddleocr
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  api:
+    build: .
+    env_file: .env
+    command: ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./config:/app/config:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  paddlex_cache:
+  paddleocr_cache:
