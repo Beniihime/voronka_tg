@@ -42,7 +42,10 @@ class RecognitionPipeline:
             image_path
         )
 
-        logger.info("========== OCR RESULT: %s ==========", image_path)
+        logger.info(
+            "========== OCR RESULT: %s ==========",
+            image_path,
+        )
 
         for i, token in enumerate(tokens):
             logger.info(
@@ -53,17 +56,18 @@ class RecognitionPipeline:
                 token.box,
             )
 
-        logger.info("========== END OCR RESULT ==========")
+        logger.info(
+            "========== END OCR RESULT =========="
+        )
 
         # =====================================================
-        # Геометрический extraction.
-        #
-        # Здесь OCR БОЛЬШЕ НЕ ЗАПУСКАЕТСЯ.
+        # EXTRACTION
         # =====================================================
 
-        fields = extract_from_full_text(tokens)
+        fields = extract_from_full_text(
+            tokens
+        )
 
-        # Пока статус задачи устанавливается автоматически.
         fields["task_status"] = FieldResult(
             value="Не начато",
             confidence=1.0,
@@ -74,8 +78,14 @@ class RecognitionPipeline:
         )
 
         logger.info(
-            "EXTRACTED RESULT: number=%r date=%r counterparty=%r "
-            "phone=%r comment=%r manager=%r task_status=%r",
+            "EXTRACTED RESULT: "
+            "number=%r "
+            "date=%r "
+            "counterparty=%r "
+            "phone=%r "
+            "comment=%r "
+            "manager=%r "
+            "task_status=%r",
             result.number.value,
             result.date.value,
             result.counterparty.value,

@@ -14,12 +14,18 @@ def _as_box(value) -> tuple[tuple[float, float], ...] | None:
     Supports:
         [[x1, y1], [x2, y2], ...]
         [x1, y1, x2, y2]
+        numpy arrays returned by PaddleOCR 3.x
     """
     if value is None:
         return None
 
     try:
-        # Polygon: [[x, y], [x, y], ...]
+        # PaddleOCR 3.x may return numpy.ndarray.
+        if hasattr(value, "tolist"):
+            value = value.tolist()
+
+        # Polygon:
+        # [[x, y], [x, y], ...]
         if (
             isinstance(value, (list, tuple))
             and value
@@ -29,17 +35,21 @@ def _as_box(value) -> tuple[tuple[float, float], ...] | None:
                 (float(point[0]), float(point[1]))
                 for point in value
             )
+
             return points if points else None
 
-        # Rectangle: [x1, y1, x2, y2]
+        # Rectangle:
+        # [x1, y1, x2, y2]
         if isinstance(value, (list, tuple)) and len(value) == 4:
             x1, y1, x2, y2 = map(float, value)
+
             return (
                 (x1, y1),
                 (x2, y1),
                 (x2, y2),
                 (x1, y2),
             )
+
     except (TypeError, ValueError, IndexError):
         return None
 
@@ -73,7 +83,6 @@ class PaddleOCRProvider(OCRProvider):
     """
     Local Russian OCR.
 
-    Important:
     One image -> exactly one PaddleOCR.predict() call.
     """
 
@@ -98,8 +107,7 @@ class PaddleOCRProvider(OCRProvider):
     def recognize(self, image_path: Path) -> list[OCRToken]:
         engine = self._get_engine()
 
-        # IMPORTANT:
-        # exactly one OCR call for the whole image.
+        # Exactly one OCR call for the whole image.
         result = engine.predict(str(image_path))
 
         tokens: list[OCRToken] = []
@@ -111,8 +119,6 @@ class PaddleOCRProvider(OCRProvider):
                 texts = data.get("rec_texts", [])
                 scores = data.get("rec_scores", [])
 
-                # PaddleOCR 3.x normally provides rec_boxes.
-                # dt_polys is kept as a fallback.
                 boxes = data.get(
                     "rec_boxes",
                     data.get("dt_polys", []),
@@ -141,14 +147,7 @@ class PaddleOCRProvider(OCRProvider):
 
                 continue
 
-            # Compatibility with old PaddleOCR output:
-            #
-            # [
-            #     [
-            #         [box, (text, confidence)],
-            #         ...
-            #     ]
-            # ]
+            # Compatibility with old PaddleOCR output.
             for line in page or []:
                 if len(line) >= 2 and isinstance(line[1], tuple):
                     text, confidence = line[1]
