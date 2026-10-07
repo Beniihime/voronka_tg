@@ -4,16 +4,17 @@ import cv2
 import yaml
 
 
-def preprocess_image(source: Path, destination: Path) -> None:
-    """Upscale and improve contrast while preserving the screenshot text."""
+def preprocess_image(source: Path, destination: Path) -> tuple[int, int]:
     image = cv2.imread(str(source))
+
     if image is None:
         raise ValueError(f"Unable to read image: {source}")
-    image = cv2.resize(image, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(gray)
-    cv2.imwrite(str(destination), enhanced)
+
+    if not cv2.imwrite(str(destination), image):
+        raise ValueError(f"Unable to write image: {destination}")
+
+    height, width = image.shape[:2]
+    return width, height
 
 
 def crop_relative_roi(source: Path, destination: Path, roi: dict[str, float]) -> None:

@@ -7,6 +7,7 @@ from pathlib import Path
 class OCRToken:
     text: str
     confidence: float
+    box: tuple[tuple[float, float], ...] | None = None
 
 
 class OCRProvider(ABC):
