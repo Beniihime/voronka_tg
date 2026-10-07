@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from app.ocr.provider import OCRToken
 from app.schemas import FieldResult
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 # =============================================================================
 # REGEX
@@ -1205,6 +1209,8 @@ def extract_from_full_text(
         OCRToken[]
     """
 
+    
+
     fields: dict[str, FieldResult] = {
         "number": FieldResult(),
         "date": FieldResult(),
@@ -1238,6 +1244,19 @@ def extract_from_full_text(
     # =========================================================================
 
     labels = find_labels(tokens)
+
+    logger.info("========== FOUND LABELS ==========")
+
+    for label in labels:
+        logger.info(
+            "LABEL field=%s text=%r index=%s box=%s",
+            label.field,
+            label.text,
+            label.index,
+            label.box,
+        )
+
+    logger.info("========== END FOUND LABELS ==========")
 
     # Если label встретился несколько раз,
     # сохраняем первый.

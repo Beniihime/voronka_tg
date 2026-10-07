@@ -42,10 +42,18 @@ class RecognitionPipeline:
             image_path
         )
 
-        logger.info(
-            "OCR finished: %d tokens",
-            len(tokens),
-        )
+        logger.info("========== OCR RESULT: %s ==========", image_path)
+
+        for i, token in enumerate(tokens):
+            logger.info(
+                "OCR[%03d] text=%r confidence=%.4f box=%s",
+                i,
+                token.text,
+                token.confidence,
+                token.box,
+            )
+
+        logger.info("========== END OCR RESULT ==========")
 
         # =====================================================
         # Геометрический extraction.
@@ -66,13 +74,15 @@ class RecognitionPipeline:
         )
 
         logger.info(
-            "Recognition completed: number=%r, date=%r, "
-            "counterparty=%r, phone=%r, manager=%r",
+            "EXTRACTED RESULT: number=%r date=%r counterparty=%r "
+            "phone=%r comment=%r manager=%r task_status=%r",
             result.number.value,
             result.date.value,
             result.counterparty.value,
             result.phone.value,
+            result.comment.value,
             result.manager.value,
+            result.task_status.value,
         )
 
         return result

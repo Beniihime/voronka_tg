@@ -4,9 +4,6 @@ import re
 from app.ocr.extraction import normalize_number, normalize_phone
 from app.schemas import RecognitionResult
 
-TASK_STATUSES = {"Выполнено", "В процессе", "Не начато", "Передан"}
-
-
 class ValidationError(ValueError):
     pass
 
@@ -25,7 +22,8 @@ def validate_result(result: RecognitionResult) -> RecognitionResult:
     for name in ("counterparty", "comment", "manager"):
         if not getattr(result, name).value.strip():
             raise ValidationError(f"Поле «{name}» не должно быть пустым.")
-    if result.task_status.value not in TASK_STATUSES:
-        allowed = ", ".join(sorted(TASK_STATUSES))
-        raise ValidationError(f"Статус задачи должен быть одним из: {allowed}.")
+    if not result.task_status.value.strip():
+        raise ValidationError(
+            "Статус задачи не должен быть пустым."
+        )
     return result

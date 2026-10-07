@@ -7,7 +7,13 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from app.bot.keyboards import FIELDS, duplicate_keyboard, fields_keyboard, review_keyboard
+from app.bot.keyboards import (
+    FIELDS,
+    duplicate_keyboard,
+    fields_keyboard,
+    review_keyboard,
+    dropdown_keyboard,
+)
 from app.bot.states import EditField
 from app.config import get_settings
 from app.db.models import JobStatus
@@ -126,6 +132,282 @@ async def request_field_value(callback: CallbackQuery, state: FSMContext) -> Non
     await callback.message.edit_text(f"Введите правильное значение для поля «{FIELDS[parts[2]]}».")
     await callback.answer()
 
+@router.callback_query(
+    F.data.startswith("select:")
+)
+async def select_dropdown(
+    callback: CallbackQuery,
+) -> None:
+    """
+    Открывает список значений из Google Sheets.
+    """
+
+    if callback.from_user is None:
+        return
+
+    parts = (
+        callback.data or ""
+    ).split(":")
+
+    if len(parts) != 3:
+        await callback.answer(
+            "Некорректный запрос",
+            show_alert=True,
+        )
+        return
+
+    _, field_name, job_id_raw = parts
+
+    if field_name not in {
+        "manager",
+        "task_status",
+    }:
+        await callback.answer(
+            "Для этого поля нет списка",
+            show_alert=True,
+        )
+        return
+
+    try:
+        job_id = uuid.UUID(job_id_raw)
+    except ValueError:
+        await callback.answer(
+            "Некорректная заявка",
+            show_alert=True,
+        )
+        return
+
+    session, repo, job = await load_owned_job(
+        job_id,
+        callback.from_user.id,
+    )
+
+    try:
+        if job is None:
+            await callback.answer(
+                "Заявка не найдена",
+                show_alert=True,
+            )
+            return
+
+        if job.status not in {
+            JobStatus.AWAITING_CONFIRMATION,
+            JobStatus.AWAITING_DUPLICATE_DECISION,
+        }:
+            await callback.answer(
+                "Эта заявка уже обработана.",
+                show_alert=True,
+            )
+            return
+
+        sheets = GoogleSheetsService()
+
+        options = await sheets.get_dropdown_options(
+            field_name
+        )
+
+        if not options:
+            await callback.answer(
+                "В таблице не найден список значений.",
+                show_alert=True,
+            )
+            return
+
+        field_title = {
+            "manager": "менеджера",
+            "task_status": "статус",
+        }[field_name]
+
+        await callback.message.edit_text(
+            f"Выберите {field_title}:",
+            reply_markup=dropdown_keyboard(
+                job.id,
+                field_name,
+                options,
+            ),
+        )
+
+        await callback.answer()
+
+    except Exception:
+        logger.exception(
+            "Could not load dropdown for field=%s",
+            field_name,
+        )
+
+        await callback.answer(
+            "Не удалось получить список из Google Sheets.",
+            show_alert=True,
+        )
+
+    finally:
+        await session.close()
+
+@router.callback_query(
+    F.data.startswith("option:")
+)
+async def apply_dropdown_option(
+    callback: CallbackQuery,
+) -> None:
+    """
+    Пользователь нажал на конкретное значение dropdown.
+    """
+
+    if callback.from_user is None:
+        return
+
+    parts = (
+        callback.data or ""
+    ).split(":")
+
+    if len(parts) != 4:
+        await callback.answer(
+            "Некорректный выбор",
+            show_alert=True,
+        )
+        return
+
+    _, field_name, job_id_raw, index_raw = parts
+
+    if field_name not in {
+        "manager",
+        "task_status",
+    }:
+        await callback.answer(
+            "Некорректное поле",
+            show_alert=True,
+        )
+        return
+
+    try:
+        job_id = uuid.UUID(job_id_raw)
+        option_index = int(index_raw)
+    except ValueError:
+        await callback.answer(
+            "Некорректный выбор",
+            show_alert=True,
+        )
+        return
+
+    session, repo, job = await load_owned_job(
+        job_id,
+        callback.from_user.id,
+    )
+
+    try:
+        if job is None:
+            await callback.answer(
+                "Заявка не найдена",
+                show_alert=True,
+            )
+            return
+
+        if job.status not in {
+            JobStatus.AWAITING_CONFIRMATION,
+            JobStatus.AWAITING_DUPLICATE_DECISION,
+        }:
+            await callback.answer(
+                "Эта заявка уже обработана.",
+                show_alert=True,
+            )
+            return
+
+        sheets = GoogleSheetsService()
+
+        options = await sheets.get_dropdown_options(
+            field_name
+        )
+
+        if option_index < 0 or option_index >= len(options):
+            await callback.answer(
+                "Этот вариант больше недоступен. "
+                "Откройте список заново.",
+                show_alert=True,
+            )
+            return
+
+        selected_value = options[option_index]
+
+        await repo.correct_field(
+            job,
+            field_name,
+            selected_value,
+        )
+
+        job.status = JobStatus.AWAITING_CONFIRMATION
+
+        await session.commit()
+
+        result = repo.result_for(job)
+
+        await callback.message.edit_text(
+            format_card(
+                result,
+                result.has_low_confidence,
+            ),
+            reply_markup=review_keyboard(job.id),
+        )
+
+        await callback.answer(
+            f"Выбрано: {selected_value}"
+        )
+
+    except Exception:
+        logger.exception(
+            "Could not apply dropdown option "
+            "field=%s job=%s",
+            field_name,
+            job_id,
+        )
+
+        await callback.answer(
+            "Не удалось сохранить выбранное значение.",
+            show_alert=True,
+        )
+
+    finally:
+        await session.close()
+
+@router.callback_query(
+    F.data.startswith("dropdown_back:")
+)
+async def dropdown_back(
+    callback: CallbackQuery,
+) -> None:
+    if callback.from_user is None:
+        return
+
+    job_id = parse_job_id(
+        callback.data or ""
+    )
+
+    session, repo, job = await load_owned_job(
+        job_id,
+        callback.from_user.id,
+    )
+
+    try:
+        if job is None:
+            await callback.answer(
+                "Заявка не найдена",
+                show_alert=True,
+            )
+            return
+
+        result = repo.result_for(job)
+
+        await callback.message.edit_text(
+            format_card(
+                result,
+                result.has_low_confidence,
+            ),
+            reply_markup=review_keyboard(job.id),
+        )
+
+        await callback.answer()
+
+    finally:
+        await session.close()
 
 @router.message(EditField.waiting_for_value, F.text)
 async def save_field_value(message: Message, state: FSMContext) -> None:
