@@ -6,17 +6,35 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     telegram_bot_token: str = Field(default="")
     database_url: str = "postgresql+asyncpg://app:app@localhost:5432/one_c_bot"
+
     google_spreadsheet_id: str = ""
     google_sheet_name: str = "Заявки"
-    google_credentials_file: Path = Path("secrets/voronka-510810-a2733be4f3ce.json")
+    google_credentials_file: Path = Path(
+        "secrets/voronka-510810-a2733be4f3ce.json"
+    )
+
     image_storage_path: Path = Path("data/images")
     roi_config_path: Path = Path("config/roi.yaml")
+
     ocr_language: str = "ru"
-    low_confidence_threshold: float = Field(default=0.8, ge=0, le=1)
+    low_confidence_threshold: float = Field(
+        default=0.8,
+        ge=0,
+        le=1,
+    )
+
+    paddle_vl_enabled: bool = True
+    paddle_vl_device: str = "cpu"
+    paddle_vl_pipeline_version: str = "v1.6"
+
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
     api_port: int = 8000

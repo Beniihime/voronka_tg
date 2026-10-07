@@ -6,6 +6,7 @@ from pathlib import Path
 from app.config import get_settings
 from app.ocr.extraction import extract_from_full_text
 from app.ocr.paddle_provider import PaddleOCRProvider
+from app.ocr.vl_extractor import PaddleOCRVLExtractor
 from app.schemas import FieldResult, RecognitionResult
 
 logger = logging.getLogger(__name__)
@@ -20,8 +21,16 @@ class RecognitionPipeline:
         self.settings = settings or get_settings()
 
         self.provider = provider or PaddleOCRProvider(
-            self.settings.ocr_language
+            self.settings.ocr_language,
         )
+
+        self.vl_extractor = None
+
+        if self.settings.paddle_vl_enabled:
+            self.vl_extractor = PaddleOCRVLExtractor(
+                pipeline_version=self.settings.paddle_vl_pipeline_version,
+                device=self.settings.paddle_vl_device,
+            )
 
     def recognize(
         self,
@@ -30,43 +39,68 @@ class RecognitionPipeline:
         image_path = Path(image_path)
 
         logger.info(
-            "Starting OCR for image: %s",
+            "Starting recognition for image: %s",
             image_path,
         )
 
-        # =====================================================
-        # ЕДИНСТВЕННЫЙ OCR-ПРОХОД
-        # =====================================================
+        fields = None
 
-        tokens = self.provider.recognize(
-            image_path
-        )
+        if self.vl_extractor is not None:
+            try:
+                logger.info(
+                    "========== START PADDLEOCR-VL ==========",
+                )
 
-        logger.info(
-            "========== OCR RESULT: %s ==========",
-            image_path,
-        )
+                fields = self.vl_extractor.extract(
+                    image_path,
+                )
 
-        for i, token in enumerate(tokens):
+                logger.info(
+                    "========== END PADDLEOCR-VL ==========",
+                )
+
+                for name, field in fields.items():
+                    logger.info(
+                        "VL FIELD %-15s value=%r confidence=%.3f",
+                        name,
+                        field.value,
+                        field.confidence,
+                    )
+
+            except Exception:
+                logger.exception(
+                    "PaddleOCR-VL failed. Falling back to classic PaddleOCR.",
+                )
+                fields = None
+
+        if fields is None:
             logger.info(
-                "OCR[%03d] text=%r confidence=%.4f box=%s",
-                i,
-                token.text,
-                token.confidence,
-                token.box,
+                "========== START CLASSIC PADDLEOCR ==========",
             )
 
-        logger.info(
-            "========== END OCR RESULT =========="
-        )
+            tokens = self.provider.recognize(
+                image_path,
+            )
 
-        # =====================================================
-        # EXTRACTION
-        # =====================================================
+            logger.info(
+                "========== OCR RESULT: %s ==========",
+                image_path,
+            )
 
-        fields = extract_from_full_text(
-            tokens
-        )
+            for i, token in enumerate(tokens):
+                logger.info(
+                    "OCR[%03d] text=%r confidence=%.4f box=%s",
+                    i,
+                    token.text,
+                    token.confidence,
+                    token.box,
+                )
+
+            logger.info(
+                "========== END OCR RESULT ==========",
+            )
+
+            fields = extract_from_full_text(tokens)
 
         fields["task_status"] = FieldResult(
             value="Не начато",
@@ -74,7 +108,7 @@ class RecognitionPipeline:
         )
 
         result = RecognitionResult(
-            **fields
+            **fields,
         )
 
         logger.info(

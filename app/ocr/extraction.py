@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 
 from app.ocr.provider import OCRToken
 from app.schemas import FieldResult
@@ -22,12 +21,28 @@ NUMBER_RE = re.compile(
     re.IGNORECASE,
 )
 
+
+# Поддерживает:
+#
+# 07.10.2026
+# 07.10.2026 12:06
+# 07.10.2026 12:06:40
+# 07.10.202612-06-40
+# 07.10.202612:06:40
+#
 DATE_RE = re.compile(
     r"(?<!\d)"
-    r"(\d{2}[.\-/]\d{2}[.\-/]\d{4}"
-    r"(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?)"
+    r"(\d{2}[.\-/]\d{2}[.\-/]\d{4})"
+    r"(?:"
+    r"\s*"
+    r"(\d{1,2})"
+    r"[:\-]"
+    r"(\d{2})"
+    r"(?:[:\-](\d{2}))?"
+    r")?"
     r"(?!\d)"
 )
+
 
 PHONE_RE = re.compile(
     r"(?<!\d)"
@@ -48,13 +63,26 @@ PHONE_RE = re.compile(
 )
 
 
+# Менеджер ВСЕГДА берётся из:
+#
+# Автор: Аксёнова Виктория Алексеевна:
+# Редактор: Давыдова Анастасия Сергеевна
+#
+AUTHOR_RE = re.compile(
+    r"(?:^|\s)"
+    r"автор"
+    r"\s*[:\-]?\s*"
+    r"(.*?)"
+    r"(?=\s*[:\-]?\s*редактор\s*[:\-]?)"
+    ,
+    re.IGNORECASE,
+)
+
+
 # =============================================================================
 # LABELS
 # =============================================================================
 
-# ВАЖНО:
-# "№" больше не используем как обычный label.
-# Иначе он находится внутри адресов и других текстов.
 LABELS: dict[str, tuple[str, ...]] = {
     "number": (
         "номер",
@@ -75,38 +103,46 @@ LABELS: dict[str, tuple[str, ...]] = {
         "комментарий",
     ),
     "manager": (
+        "автор",
         "менеджер",
         "ответственный",
-        "автор",
     ),
 }
 
 
-# Допустимые OCR-варианты.
+# OCR может искажать отдельные labels.
+#
+# ВАЖНО:
+# сюда не добавляем слишком общие варианты,
+# иначе снова появятся ложные совпадения.
 OCR_LABEL_ALIASES: dict[str, tuple[str, ...]] = {
     "date": (
-        "ата",
         "aта",
         "дaта",
+        "aта",
     ),
     "phone": (
         "тел",
         "тeл",
         "тeлeфон",
     ),
-    "counterparty": (
-        "контрaгент",
-        "контрагeнт",
-    ),
     "manager": (
+        "автор",
+        "aвтор",
+        "менеджер",
         "менeджер",
-        "менеджeр",
-        "менедж",
     ),
 }
 
 
-# Что точно говорит о верхнем меню, а не о поле комментария.
+# =============================================================================
+# UI / COMMENT STOP MARKERS
+# =============================================================================
+
+# Верхнее меню.
+#
+# Если OCR-токен содержит несколько этих слов,
+# то "Дополнительно" в нём НЕ считается comment label.
 TOP_MENU_MARKERS = (
     "провести",
     "создать",
@@ -117,7 +153,10 @@ TOP_MENU_MARKERS = (
 )
 
 
-# Что говорит о начале следующего блока после комментария.
+# После комментария начинается таблица.
+#
+# Всё, что находится начиная с этих заголовков,
+# в comment больше не попадает.
 COMMENT_STOP_MARKERS = (
     "пп клиента",
     "конфигурация",
@@ -132,6 +171,7 @@ COMMENT_STOP_MARKERS = (
     "шаблон",
     "вручную",
     "статус протокола",
+    "статус проведенных работ",
     "статус проведенных работ",
     "по наряду",
     "статус подтверждения",
@@ -151,19 +191,31 @@ class Box:
 
     @property
     def width(self) -> float:
-        return max(0.0, self.right - self.left)
+        return max(
+            0.0,
+            self.right - self.left,
+        )
 
     @property
     def height(self) -> float:
-        return max(0.0, self.bottom - self.top)
+        return max(
+            0.0,
+            self.bottom - self.top,
+        )
 
     @property
     def center_x(self) -> float:
-        return (self.left + self.right) / 2.0
+        return (
+            self.left
+            + self.right
+        ) / 2.0
 
     @property
     def center_y(self) -> float:
-        return (self.top + self.bottom) / 2.0
+        return (
+            self.top
+            + self.bottom
+        ) / 2.0
 
 
 @dataclass(frozen=True)
@@ -174,14 +226,29 @@ class LabelMatch:
     label_text: str
 
 
-def _box(token: OCRToken) -> Box | None:
+def _box(
+    token: OCRToken,
+) -> Box | None:
+
     if not token.box:
         return None
 
     try:
-        xs = [float(point[0]) for point in token.box]
-        ys = [float(point[1]) for point in token.box]
-    except (TypeError, ValueError, IndexError):
+        xs = [
+            float(point[0])
+            for point in token.box
+        ]
+
+        ys = [
+            float(point[1])
+            for point in token.box
+        ]
+
+    except (
+        TypeError,
+        ValueError,
+        IndexError,
+    ):
         return None
 
     if not xs or not ys:
@@ -196,15 +263,66 @@ def _box(token: OCRToken) -> Box | None:
 
 
 # =============================================================================
-# TEXT
+# TEXT NORMALIZATION
 # =============================================================================
 
-def _normalize_spaces(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
+def _normalize_spaces(
+    text: str,
+) -> str:
+
+    return re.sub(
+        r"\s+",
+        " ",
+        text,
+    ).strip()
 
 
-def _normalize_search(text: str) -> str:
-    text = text.lower().strip()
+def _normalize_homoglyphs(
+    text: str,
+) -> str:
+    """
+    Исправляет типичные латинские символы,
+    которые OCR принимает за кириллицу.
+    """
+
+    replacements = {
+        "A": "А",
+        "a": "а",
+        "B": "В",
+        "c": "с",
+        "C": "С",
+        "e": "е",
+        "E": "Е",
+        "o": "о",
+        "O": "О",
+        "p": "р",
+        "P": "Р",
+        "x": "х",
+        "X": "Х",
+        "y": "у",
+        "K": "К",
+        "M": "М",
+        "T": "Т",
+    }
+
+    return "".join(
+        replacements.get(
+            char,
+            char,
+        )
+        for char in text
+    )
+
+
+def _normalize_search(
+    text: str,
+) -> str:
+
+    text = _normalize_homoglyphs(
+        text
+    )
+
+    text = text.lower()
 
     replacements = {
         "ё": "е",
@@ -213,45 +331,93 @@ def _normalize_search(text: str) -> str:
     }
 
     for old, new in replacements.items():
-        text = text.replace(old, new)
+        text = text.replace(
+            old,
+            new,
+        )
 
-    return _normalize_spaces(text)
+    return _normalize_spaces(
+        text
+    )
 
 
-def _normalize_compact(text: str) -> str:
-    text = _normalize_search(text)
-    return re.sub(r"[^а-яa-z0-9]+", "", text)
+def _normalize_compact(
+    text: str,
+) -> str:
+
+    text = _normalize_search(
+        text
+    )
+
+    return re.sub(
+        r"[^а-яa-z0-9]+",
+        "",
+        text,
+    )
 
 
-def _clean_value(text: str) -> str:
+def _clean_value(
+    text: str,
+) -> str:
+
     text = text.strip()
-    text = text.lstrip(" :;,-–—")
-    text = _normalize_spaces(text)
+
+    text = text.lstrip(
+        " :;,-–—"
+    )
+
+    text = _normalize_spaces(
+        text
+    )
+
     return text.strip()
 
 
 # =============================================================================
-# FORMAT VALIDATORS
+# FORMAT CHECKS
 # =============================================================================
 
-def _looks_like_number(text: str) -> bool:
-    return NUMBER_RE.search(text) is not None
+def _looks_like_number(
+    text: str,
+) -> bool:
+
+    return (
+        NUMBER_RE.search(text)
+        is not None
+    )
 
 
-def _looks_like_date(text: str) -> bool:
-    return DATE_RE.search(text) is not None
+def _looks_like_date(
+    text: str,
+) -> bool:
+
+    return (
+        DATE_RE.search(text)
+        is not None
+    )
 
 
-def _looks_like_phone(text: str) -> bool:
-    return PHONE_RE.search(text) is not None
+def _looks_like_phone(
+    text: str,
+) -> bool:
+
+    return (
+        PHONE_RE.search(text)
+        is not None
+    )
 
 
 # =============================================================================
 # LABEL MATCHING
 # =============================================================================
 
-def _is_top_menu_token(text: str) -> bool:
-    normalized = _normalize_search(text)
+def _is_top_menu_token(
+    text: str,
+) -> bool:
+
+    normalized = _normalize_search(
+        text
+    )
 
     matches = 0
 
@@ -266,80 +432,28 @@ def _exact_label_match(
     text: str,
 ) -> tuple[str, str] | None:
 
-    normalized = _normalize_search(text)
+    normalized = _normalize_search(
+        text
+    )
 
     if not normalized:
         return None
 
     for field, labels in LABELS.items():
         for label in labels:
-            if normalized == _normalize_search(label):
+            if (
+                normalized
+                == _normalize_search(label)
+            ):
                 return field, label
 
     for field, aliases in OCR_LABEL_ALIASES.items():
         for alias in aliases:
-            if normalized == _normalize_search(alias):
+            if (
+                normalized
+                == _normalize_search(alias)
+            ):
                 return field, alias
-
-    return None
-
-
-def _fuzzy_label_match(
-    text: str,
-) -> tuple[str, str] | None:
-
-    normalized = _normalize_compact(text)
-
-    if not normalized:
-        return None
-
-    # Одно-/двухбуквенные фрагменты fuzzy-search запрещаем.
-    if len(normalized) < 4:
-        return None
-
-    best_field: str | None = None
-    best_label: str | None = None
-    best_score = 0.0
-
-    candidates: list[
-        tuple[str, str]
-    ] = []
-
-    for field, labels in LABELS.items():
-        for label in labels:
-            candidates.append(
-                (field, label)
-            )
-
-    for field, aliases in OCR_LABEL_ALIASES.items():
-        for alias in aliases:
-            candidates.append(
-                (field, alias)
-            )
-
-    for field, label in candidates:
-        target = _normalize_compact(label)
-
-        if not target:
-            continue
-
-        # Fuzzy только для приблизительно одинаковых по размеру слов.
-        if abs(len(normalized) - len(target)) > 4:
-            continue
-
-        score = SequenceMatcher(
-            None,
-            normalized,
-            target,
-        ).ratio()
-
-        if score > best_score:
-            best_score = score
-            best_field = field
-            best_label = label
-
-    if best_score >= 0.78 and best_field and best_label:
-        return best_field, best_label
 
     return None
 
@@ -347,47 +461,55 @@ def _fuzzy_label_match(
 def _embedded_label_matches(
     token: OCRToken,
 ) -> list[tuple[str, str]]:
+    """
+    Ищет labels внутри большого OCR-блока.
+
+    Например:
+
+        Акты /Отчеты сотрудникаЧто сделано
+        (заполняется исполнителем)Ремонт оборудования
+        КомментарийДополнительно
+
+    """
 
     text = token.text
 
     if not text.strip():
         return []
 
-    normalized = _normalize_search(text)
-
-    result: list[tuple[str, str]] = []
-
-    # -------------------------------------------------------------------------
-    # Верхнее меню:
-    #
-    # "Провести ... Дополнительно ..."
-    #
-    # "дополнительно" здесь НЕ является comment label.
-    # -------------------------------------------------------------------------
-
     if _is_top_menu_token(text):
         return []
 
+    normalized = _normalize_search(
+        text
+    )
+
+    result: list[
+        tuple[str, str]
+    ] = []
+
     # -------------------------------------------------------------------------
-    # Ищем только многосимвольные labels.
-    # "№" здесь принципиально нет.
+    # Обычные labels.
     # -------------------------------------------------------------------------
 
     for field, labels in LABELS.items():
         for label in labels:
-            label_normalized = _normalize_search(label)
+            label_normalized = (
+                _normalize_search(label)
+            )
 
+            # Однобуквенные / слишком короткие варианты
+            # принципиально не ищем внутри длинного текста.
             if len(label_normalized) < 4:
                 continue
 
-            if label_normalized not in normalized:
+            if (
+                label_normalized
+                not in normalized
+            ):
                 continue
 
-            # Для "дата" не принимаем:
-            #
-            # "Дата сдачи отзыва"
-            #
-            # как отдельный date label.
+            # "Дата сдачи отзыва" не является реквизитом "Дата".
             if (
                 field == "date"
                 and re.search(
@@ -425,13 +547,23 @@ def find_labels(
             continue
 
         # ---------------------------------------------------------------------
-        # 1. Точное совпадение целого токена.
+        # 1. Полный OCR token == label.
         # ---------------------------------------------------------------------
 
-        exact = _exact_label_match(text)
+        exact = _exact_label_match(
+            text
+        )
 
         if exact is not None:
             field, label = exact
+
+            # "Дата сдачи отзыва" не принимаем.
+            if (
+                field == "date"
+                and "сдачи"
+                in _normalize_search(text)
+            ):
+                continue
 
             result.append(
                 LabelMatch(
@@ -445,35 +577,7 @@ def find_labels(
             continue
 
         # ---------------------------------------------------------------------
-        # 2. Для коротких/искажённых label пробуем fuzzy.
-        # ---------------------------------------------------------------------
-
-        fuzzy = _fuzzy_label_match(text)
-
-        if fuzzy is not None:
-            field, label = fuzzy
-
-            # Длинный текст с похожим словом не принимаем.
-            if len(_normalize_search(text)) <= len(
-                _normalize_search(label)
-            ) + 5:
-                result.append(
-                    LabelMatch(
-                        field=field,
-                        token=token,
-                        box=box,
-                        label_text=label,
-                    )
-                )
-
-                continue
-
-        # ---------------------------------------------------------------------
-        # 3. Склеенные OCR-блоки.
-        #
-        # Например:
-        #
-        # "Акты /Отчеты сотрудникаЧто сделано ... Комментарий ..."
+        # 2. Label находится внутри большого OCR token.
         # ---------------------------------------------------------------------
 
         embedded = _embedded_label_matches(
@@ -494,10 +598,91 @@ def find_labels(
 
 
 # =============================================================================
+# DATE EXTRACTION
+# =============================================================================
+
+def _extract_date_from_labeled_token(
+    token: OCRToken,
+) -> FieldResult:
+    """
+    Дата имеет отдельное правило.
+
+    Разрешены варианты:
+
+        Дата: 07.10.2026 12:06:40
+        Дата:07.10.2026 12:06:40
+        Дaта:07.10.202612-06-40
+    """
+
+    original = token.text.strip()
+
+    if not original:
+        return FieldResult()
+
+    normalized = _normalize_homoglyphs(
+        original
+    )
+
+    normalized_lower = normalized.lower()
+
+    if not re.match(
+        r"^\s*дата\s*[:\-]?",
+        normalized_lower,
+    ):
+        return FieldResult()
+
+    match = DATE_RE.search(
+        normalized_lower
+    )
+
+    if not match:
+        return FieldResult()
+
+    raw = match.group(0)
+
+    return FieldResult(
+        value=normalize_date(
+            raw
+        ),
+        confidence=max(
+            0.0,
+            min(
+                1.0,
+                float(token.confidence),
+            ),
+        ),
+        raw_text=original,
+    )
+
+
+def _extract_date(
+    tokens: list[OCRToken],
+) -> FieldResult:
+    """
+    Приоритет:
+
+        1. OCR token, начинающийся с "Дата".
+        2. Только затем общий regex fallback.
+
+    Это защищает от старых дат в истории/связанных документах.
+    """
+
+    for token in tokens:
+        result = _extract_date_from_labeled_token(
+            token
+        )
+
+        if result.value:
+            return result
+
+    return FieldResult()
+
+
+# =============================================================================
 # INLINE VALUE
 # =============================================================================
 
-def _extract_inline_value_from_same_token(
+def _extract_inline_value_same_token(
     field: str,
     token: OCRToken,
 ) -> FieldResult:
@@ -507,23 +692,31 @@ def _extract_inline_value_from_same_token(
     if not text:
         return FieldResult()
 
-    normalized = _normalize_search(text)
-
-    possible_labels = list(
-        LABELS.get(field, ())
+    normalized = _normalize_search(
+        text
     )
 
-    possible_labels.extend(
-        OCR_LABEL_ALIASES.get(field, ())
+    labels = list(
+        LABELS.get(
+            field,
+            (),
+        )
+    )
+
+    labels.extend(
+        OCR_LABEL_ALIASES.get(
+            field,
+            (),
+        )
     )
 
     for label in sorted(
-        possible_labels,
+        labels,
         key=len,
         reverse=True,
     ):
-        label_normalized = _normalize_search(
-            label
+        label_normalized = (
+            _normalize_search(label)
         )
 
         pattern = re.compile(
@@ -548,18 +741,21 @@ def _extract_inline_value_from_same_token(
         if not value:
             continue
 
-        if field == "date" and not _looks_like_date(
-            value
+        if (
+            field == "number"
+            and not _looks_like_number(value)
         ):
             continue
 
-        if field == "number" and not _looks_like_number(
-            value
+        if (
+            field == "date"
+            and not _looks_like_date(value)
         ):
             continue
 
-        if field == "phone" and not _looks_like_phone(
-            value
+        if (
+            field == "phone"
+            and not _looks_like_phone(value)
         ):
             continue
 
@@ -579,26 +775,29 @@ def _extract_inline_value_from_same_token(
 
 
 # =============================================================================
-# SPATIAL SEARCH
+# SPATIAL EXTRACTION
 # =============================================================================
 
-def _is_same_line(
+def _same_line(
     label_box: Box,
     candidate_box: Box,
 ) -> bool:
 
     vertical_distance = abs(
-        label_box.center_y
-        - candidate_box.center_y
+        candidate_box.center_y
+        - label_box.center_y
     )
 
-    line_height = max(
+    reference_height = max(
         label_box.height,
         candidate_box.height,
         1.0,
     )
 
-    return vertical_distance <= line_height * 1.5
+    return (
+        vertical_distance
+        <= reference_height * 1.5
+    )
 
 
 def _find_right_candidates(
@@ -606,15 +805,18 @@ def _find_right_candidates(
     tokens: list[OCRToken],
 ) -> list[OCRToken]:
 
-    result: list[
+    candidates: list[
         tuple[float, OCRToken]
     ] = []
 
     for token in tokens:
+
         if token is label.token:
             continue
 
-        if not token.text.strip():
+        text = token.text.strip()
+
+        if not text:
             continue
 
         box = _box(token)
@@ -622,22 +824,30 @@ def _find_right_candidates(
         if box is None:
             continue
 
-        if _exact_label_match(
-            token.text
-        ) is not None:
+        # Не используем другой label как значение.
+        if (
+            _exact_label_match(text)
+            is not None
+        ):
             continue
 
-        if box.left < label.box.right:
+        # Значение должно быть справа.
+        if (
+            box.left
+            < label.box.right
+        ):
             continue
 
-        if not _is_same_line(
+        # И примерно на той же строке.
+        if not _same_line(
             label.box,
             box,
         ):
             continue
 
         horizontal_distance = (
-            box.left - label.box.right
+            box.left
+            - label.box.right
         )
 
         vertical_distance = abs(
@@ -645,25 +855,27 @@ def _find_right_candidates(
             - label.box.center_y
         )
 
+        # Чем ближе справа и чем лучше
+        # совпадает строка — тем выше кандидат.
         score = (
             horizontal_distance
             + vertical_distance * 3.0
         )
 
-        result.append(
+        candidates.append(
             (
                 score,
                 token,
             )
         )
 
-    result.sort(
+    candidates.sort(
         key=lambda item: item[0]
     )
 
     return [
         token
-        for _, token in result
+        for _, token in candidates
     ]
 
 
@@ -674,19 +886,21 @@ def _extract_by_label(
 ) -> FieldResult:
 
     # -------------------------------------------------------------------------
-    # Если label + value в одном OCR token.
+    # 1. Label + value в одном OCR token.
     # -------------------------------------------------------------------------
 
-    same_token = _extract_inline_value_from_same_token(
-        field,
-        label.token,
+    same_token = (
+        _extract_inline_value_same_token(
+            field,
+            label.token,
+        )
     )
 
     if same_token.value:
         return same_token
 
     # -------------------------------------------------------------------------
-    # Значение справа.
+    # 2. Значение справа.
     # -------------------------------------------------------------------------
 
     candidates = _find_right_candidates(
@@ -695,6 +909,7 @@ def _extract_by_label(
     )
 
     for token in candidates:
+
         value = _clean_value(
             token.text
         )
@@ -702,18 +917,21 @@ def _extract_by_label(
         if not value:
             continue
 
-        if field == "number" and not _looks_like_number(
-            value
+        if (
+            field == "number"
+            and not _looks_like_number(value)
         ):
             continue
 
-        if field == "date" and not _looks_like_date(
-            value
+        if (
+            field == "date"
+            and not _looks_like_date(value)
         ):
             continue
 
-        if field == "phone" and not _looks_like_phone(
-            value
+        if (
+            field == "phone"
+            and not _looks_like_phone(value)
         ):
             continue
 
@@ -733,10 +951,10 @@ def _extract_by_label(
 
 
 # =============================================================================
-# COMMENT STOP
+# COMMENT
 # =============================================================================
 
-def _is_comment_stop_token(
+def _is_comment_stop(
     text: str,
 ) -> bool:
 
@@ -751,48 +969,25 @@ def _is_comment_stop_token(
         if marker in normalized:
             return True
 
-    # Немного fuzzy для OCR ошибок:
-    compact = _normalize_compact(
-        normalized
-    )
-
-    for marker in COMMENT_STOP_MARKERS:
-        target = _normalize_compact(
-            marker
-        )
-
-        if len(target) < 5:
-            continue
-
-        if len(compact) > len(target) + 8:
-            continue
-
-        score = SequenceMatcher(
-            None,
-            compact,
-            target,
-        ).ratio()
-
-        if score >= 0.80:
-            return True
-
     return False
 
-
-# =============================================================================
-# COMMENT
-# =============================================================================
 
 def _extract_comment(
     label: LabelMatch,
     tokens: list[OCRToken],
 ) -> FieldResult:
+    """
+    Берёт строки ниже "Что сделано".
+
+    Прекращает сбор при начале нижней таблицы.
+    """
 
     candidates: list[
         tuple[OCRToken, Box]
     ] = []
 
     for token in tokens:
+
         if token is label.token:
             continue
 
@@ -804,7 +999,10 @@ def _extract_comment(
         if box is None:
             continue
 
-        if box.top <= label.box.bottom:
+        if (
+            box.top
+            <= label.box.bottom
+        ):
             continue
 
         candidates.append(
@@ -824,24 +1022,21 @@ def _extract_comment(
         )
     )
 
-    # -------------------------------------------------------------------------
-    # Идём сверху вниз.
-    #
-    # Останавливаемся на следующем UI-блоке.
-    # -------------------------------------------------------------------------
-
     selected: list[
         tuple[OCRToken, Box]
     ] = []
 
     for token, box in candidates:
 
-        if _is_comment_stop_token(
+        # Началась нижняя таблица.
+        if _is_comment_stop(
             token.text
         ):
             break
 
-        # Если встретили целый структурный label — прекращаем комментарий.
+        # Если появился новый UI label
+        # не относящийся к comment,
+        # тоже прекращаем сбор.
         exact = _exact_label_match(
             token.text
         )
@@ -865,7 +1060,7 @@ def _extract_comment(
         return FieldResult()
 
     # -------------------------------------------------------------------------
-    # Группировка по строкам.
+    # Группируем OCR tokens по строкам.
     # -------------------------------------------------------------------------
 
     rows: list[
@@ -873,18 +1068,19 @@ def _extract_comment(
     ] = []
 
     for token, box in selected:
+
         if not rows:
             rows.append(
                 [(token, box)]
             )
             continue
 
-        current = rows[-1]
+        current_row = rows[-1]
 
         row_center = sum(
             item[1].center_y
-            for item in current
-        ) / len(current)
+            for item in current_row
+        ) / len(current_row)
 
         tolerance = max(
             8.0,
@@ -895,9 +1091,11 @@ def _extract_comment(
             box.center_y
             - row_center
         ) <= tolerance:
-            current.append(
+
+            current_row.append(
                 (token, box)
             )
+
         else:
             rows.append(
                 [(token, box)]
@@ -906,6 +1104,7 @@ def _extract_comment(
     lines: list[str] = []
 
     for row in rows:
+
         row.sort(
             key=lambda item: item[1].left
         )
@@ -923,15 +1122,20 @@ def _extract_comment(
         if line:
             lines.append(line)
 
-    value = "\n".join(lines)
+    value = "\n".join(
+        lines
+    )
 
     if not value:
         return FieldResult()
 
-    confidence = sum(
-        token.confidence
-        for token, _ in selected
-    ) / len(selected)
+    confidence = (
+        sum(
+            float(token.confidence)
+            for token, _ in selected
+        )
+        / len(selected)
+    )
 
     return FieldResult(
         value=value,
@@ -947,12 +1151,22 @@ def _extract_comment(
 
 
 # =============================================================================
-# FALLBACK COUNTERPARTY
+# COUNTERPARTY
 # =============================================================================
 
 def _looks_like_counterparty(
     text: str,
 ) -> bool:
+    """
+    Fallback для случая, когда "Контрагент" OCR не распознал.
+
+    Например:
+
+        ПромТЭК. 000
+        ПромТЭК ООО
+        ИП Иванов Иван Иванович
+        АО Ромашка
+    """
 
     normalized = _normalize_search(
         text
@@ -961,23 +1175,83 @@ def _looks_like_counterparty(
     if not normalized:
         return False
 
-    # Юридические формы.
+    # Слишком длинный блок не является хорошим
+    # названием контрагента.
+    if len(normalized) > 100:
+        return False
+
+    # ООО / 000 в конце.
     if re.search(
-        r"\b(?:ооо|оао|ао|ип|пao|зао)\b",
+        r"(?:^|[\s.,])"
+        r"(?:ооо|000|оо0|0оо)"
+        r"\s*$",
         normalized,
         re.IGNORECASE,
     ):
         return True
 
-    # OCR может дать 000 вместо ООО.
-    if re.search(
-        r"(?:^|[\s.])000(?:$|[\s.])",
+    # ИП только в начале.
+    if re.match(
+        r"^ип(?:\s|\.|$)",
+        normalized,
+        re.IGNORECASE,
+    ):
+        return True
+
+    # АО / ОАО / ЗАО только в начале.
+    if re.match(
+        r"^(?:ао|оао|зао)"
+        r"(?:\s|\.|$)",
         normalized,
         re.IGNORECASE,
     ):
         return True
 
     return False
+
+
+def normalize_counterparty(
+    value: str,
+) -> str:
+
+    value = _normalize_spaces(
+        value
+    )
+
+    value = _normalize_homoglyphs(
+        value
+    )
+
+    # OCR:
+    #
+    # 000
+    # ОО0
+    # 0ОО
+    # OOO
+    #
+    # -> ООО
+    value = re.sub(
+        r"(?:000|оо0|0оо|оoо|ooo)$",
+        "ООО",
+        value,
+        flags=re.IGNORECASE,
+    )
+
+    # ПромТЭК. 000
+    # ПромТЭК. ООО
+    # ПромТЭК . ООО
+    #
+    # -> ПромТЭК ООО
+    value = re.sub(
+        r"\s*\.\s*ООО\s*$",
+        " ООО",
+        value,
+        flags=re.IGNORECASE,
+    )
+
+    return _clean_value(
+        value
+    )
 
 
 def _extract_counterparty_fallback(
@@ -989,20 +1263,32 @@ def _extract_counterparty_fallback(
     ] = []
 
     for token in tokens:
-        text = token.text.strip()
 
-        if not text:
+        if not token.text.strip():
             continue
 
         if not _looks_like_counterparty(
-            text
+            token.text
         ):
             continue
 
-        score = (
+        # Приоритет confidence OCR.
+        score = float(
             token.confidence
-            + 0.5
         )
+
+        # Немного предпочитаем ООО / 000,
+        # так как это наиболее частый случай.
+        normalized = _normalize_search(
+            token.text
+        )
+
+        if re.search(
+            r"(?:000|ооо|оо0|0оо)\s*$",
+            normalized,
+            re.IGNORECASE,
+        ):
+            score += 0.5
 
         candidates.append(
             (
@@ -1037,113 +1323,108 @@ def _extract_counterparty_fallback(
 
 
 # =============================================================================
-# FALLBACK MANAGER
+# MANAGER = AUTHOR
 # =============================================================================
 
-# На практике здесь лучше потом заменить на список сотрудников
-# из Google Sheets, когда мы подключим его к боту.
-KNOWN_NAMES = {
-    "александр",
-    "алексей",
-    "андрей",
-    "анна",
-    "артем",
-    "виктор",
-    "виталий",
-    "галина",
-    "дарья",
-    "денис",
-    "дмитрий",
-    "евгений",
-    "екатерина",
-    "елена",
-    "иван",
-    "игорь",
-    "ирина",
-    "максим",
-    "марина",
-    "мария",
-    "наталья",
-    "николай",
-    "олег",
-    "павел",
-    "роман",
-    "светлана",
-    "сергей",
-    "татьяна",
-    "юлия",
-}
-
-
-def _looks_like_person_name(
-    text: str,
-) -> bool:
-
-    normalized = _normalize_search(
-        text
-    )
-
-    return normalized in KNOWN_NAMES
-
-
-def _extract_manager_fallback(
+def _extract_manager_from_author(
     tokens: list[OCRToken],
 ) -> FieldResult:
+    """
+    Менеджер берётся ТОЛЬКО из реквизита "Автор".
 
-    candidates: list[
-        tuple[float, OCRToken]
-    ] = []
+    Пример:
 
-    for token in tokens:
-        text = token.text.strip()
+        Автор: Аксёнова Виктория Алексеевна:
+        Редактор: Давыдова Анастасия Сергеевна
 
-        if not text:
-            continue
+    Результат:
 
-        if not _looks_like_person_name(
-            text
-        ):
-            continue
+        Аксёнова Виктория Алексеевна
+    """
 
-        box = _box(token)
+    if not tokens:
+        return FieldResult()
 
-        if box is None:
-            continue
+    full_text = " ".join(
+        token.text.strip()
+        for token in tokens
+        if token.text.strip()
+    )
 
-        # Небольшой приоритет более уверенному OCR.
-        score = (
-            token.confidence * 100.0
+    normalized = _normalize_homoglyphs(
+        full_text
+    )
+
+    match = AUTHOR_RE.search(
+        normalized
+    )
+
+    if not match:
+        logger.info(
+            "MANAGER: Автор не найден в OCR"
         )
 
-        candidates.append(
-            (
-                score,
-                token,
+        return FieldResult()
+
+    value = _clean_value(
+        match.group(1)
+    )
+
+    # Убираем возможный двоеточие перед "Редактор".
+    value = value.rstrip(
+        " :;-"
+    ).strip()
+
+    if not value:
+        return FieldResult()
+
+    # -------------------------------------------------------------------------
+    # Confidence.
+    #
+    # Ищем OCR token, в котором встречается имя автора.
+    # -------------------------------------------------------------------------
+
+    confidence_values: list[float] = []
+
+    normalized_value = (
+        _normalize_search(value)
+    )
+
+    for token in tokens:
+
+        token_normalized = (
+            _normalize_search(
+                token.text
             )
         )
 
-    if not candidates:
-        return FieldResult()
+        if (
+            normalized_value
+            and normalized_value
+            in token_normalized
+        ):
+            confidence_values.append(
+                float(token.confidence)
+            )
 
-    candidates.sort(
-        key=lambda item: item[0],
-        reverse=True,
-    )
-
-    token = candidates[0][1]
+    if confidence_values:
+        confidence = (
+            sum(confidence_values)
+            / len(confidence_values)
+        )
+    else:
+        confidence = 0.80
 
     return FieldResult(
-        value=_clean_value(
-            token.text
-        ),
+        value=value,
         confidence=max(
             0.0,
             min(
                 1.0,
-                float(token.confidence),
+                confidence,
             ),
         ),
-        raw_text=token.text,
+        raw_text=match.group(0),
     )
 
 
@@ -1193,23 +1474,43 @@ def normalize_date(
 
     value = value.strip()
 
-    value = value.replace(
+    match = DATE_RE.search(
+        value
+    )
+
+    if not match:
+        return value
+
+    date_part = match.group(1)
+
+    hour = match.group(2)
+    minute = match.group(3)
+    second = match.group(4)
+
+    date_part = date_part.replace(
         "/",
         ".",
     )
 
-    value = value.replace(
+    date_part = date_part.replace(
         "-",
         ".",
     )
 
-    value = re.sub(
-        r"\s+",
-        " ",
-        value,
-    )
+    if hour and minute:
 
-    return value
+        if second:
+            return (
+                f"{date_part} "
+                f"{hour}:{minute}:{second}"
+            )
+
+        return (
+            f"{date_part} "
+            f"{hour}:{minute}"
+        )
+
+    return date_part
 
 
 def normalize_phone(
@@ -1242,34 +1543,6 @@ def normalize_phone(
     )
 
 
-def normalize_counterparty(
-    value: str,
-) -> str:
-
-    value = _normalize_spaces(
-        value
-    )
-
-    # 000 / ОО0 / 0O0 -> ООО
-    value = re.sub(
-        r"\b[0оo]{3}\b",
-        "ООО",
-        value,
-        flags=re.IGNORECASE,
-    )
-
-    value = re.sub(
-        r"\s*\.\s*(ООО)\b",
-        r" \1",
-        value,
-        flags=re.IGNORECASE,
-    )
-
-    return _clean_value(
-        value
-    )
-
-
 # =============================================================================
 # PATTERN FALLBACK
 # =============================================================================
@@ -1280,6 +1553,7 @@ def _extract_pattern(
 ) -> FieldResult:
 
     if field == "number":
+
         match = NUMBER_RE.search(
             full_text
         )
@@ -1290,12 +1564,15 @@ def _extract_pattern(
         raw = match.group(1)
 
         return FieldResult(
-            value=normalize_number(raw),
+            value=normalize_number(
+                raw
+            ),
             confidence=0.75,
             raw_text=raw,
         )
 
     if field == "date":
+
         match = DATE_RE.search(
             full_text
         )
@@ -1303,15 +1580,18 @@ def _extract_pattern(
         if not match:
             return FieldResult()
 
-        raw = match.group(1)
+        raw = match.group(0)
 
         return FieldResult(
-            value=normalize_date(raw),
-            confidence=0.75,
+            value=normalize_date(
+                raw
+            ),
+            confidence=0.70,
             raw_text=raw,
         )
 
     if field == "phone":
+
         match = PHONE_RE.search(
             full_text
         )
@@ -1322,7 +1602,9 @@ def _extract_pattern(
         raw = match.group(0)
 
         return FieldResult(
-            value=normalize_phone(raw),
+            value=normalize_phone(
+                raw
+            ),
             confidence=0.75,
             raw_text=raw,
         )
@@ -1337,6 +1619,22 @@ def _extract_pattern(
 def extract_from_full_text(
     tokens: list[OCRToken],
 ) -> dict[str, FieldResult]:
+    """
+    Один OCR -> extraction.
+
+    Никаких дополнительных OCR проходов.
+
+    Основной принцип:
+
+        label -> значение рядом
+
+    Специальные поля:
+
+        date        -> реквизит "Дата:"
+        manager     -> "Автор:" ... "Редактор:"
+        comment     -> ниже "Что сделано"
+        counterparty -> label либо fallback по названию организации
+    """
 
     fields: dict[str, FieldResult] = {
         "number": FieldResult(),
@@ -1351,10 +1649,12 @@ def extract_from_full_text(
         return fields
 
     # =========================================================================
-    # 1. ИЩЕМ LABELS
+    # 1. LABELS
     # =========================================================================
 
-    labels = find_labels(tokens)
+    labels = find_labels(
+        tokens
+    )
 
     logger.info(
         "========== FOUND LABELS =========="
@@ -1374,16 +1674,32 @@ def extract_from_full_text(
     )
 
     # =========================================================================
-    # 2. INLINE LABELS
+    # 2. DATE
+    #
+    # ВАЖНО:
+    # дата сначала ищется по реквизиту "Дата:".
+    # =========================================================================
+
+    fields["date"] = _extract_date(
+        tokens
+    )
+
+    # =========================================================================
+    # 3. Обычные inline-поля.
+    #
+    # Номер здесь можно найти через label "Номер",
+    # хотя чаще он будет найден regex fallback.
+    #
+    # Контрагент / телефон ищутся по label,
+    # если label OCR действительно увидел.
     # =========================================================================
 
     for field in (
         "number",
-        "date",
         "counterparty",
         "phone",
-        "manager",
     ):
+
         field_labels = [
             label
             for label in labels
@@ -1391,6 +1707,7 @@ def extract_from_full_text(
         ]
 
         for label in field_labels:
+
             result = _extract_by_label(
                 field,
                 label,
@@ -1404,7 +1721,10 @@ def extract_from_full_text(
             break
 
     # =========================================================================
-    # 3. COMMENT
+    # 4. COMMENT
+    #
+    # Если найдено несколько comment labels,
+    # предпочитаем "Что сделано".
     # =========================================================================
 
     comment_labels = [
@@ -1413,16 +1733,17 @@ def extract_from_full_text(
         if label.field == "comment"
     ]
 
-    # Предпочитаем именно "что сделано".
     comment_labels.sort(
         key=lambda label: (
             0
-            if label.label_text == "что сделано"
+            if label.label_text
+            == "что сделано"
             else 1
         )
     )
 
     for label in comment_labels:
+
         result = _extract_comment(
             label,
             tokens,
@@ -1433,7 +1754,7 @@ def extract_from_full_text(
             break
 
     # =========================================================================
-    # 4. FULL TEXT
+    # 5. FULL OCR TEXT
     # =========================================================================
 
     full_text = " ".join(
@@ -1443,10 +1764,11 @@ def extract_from_full_text(
     )
 
     # =========================================================================
-    # 5. NUMBER
+    # 6. NUMBER FALLBACK
     # =========================================================================
 
     if fields["number"].value:
+
         fields["number"] = FieldResult(
             value=normalize_number(
                 fields["number"].value
@@ -1454,48 +1776,39 @@ def extract_from_full_text(
             confidence=fields["number"].confidence,
             raw_text=fields["number"].raw_text,
         )
+
     else:
+
         fields["number"] = _extract_pattern(
             "number",
             full_text,
         )
 
     # =========================================================================
-    # 6. DATE
+    # 7. DATE FALLBACK
+    #
+    # До сюда попадём только если "Дата:" вообще не нашлась.
     # =========================================================================
 
-    if fields["date"].value:
-        date_match = DATE_RE.search(
-            fields["date"].value
-        )
-
-        if date_match:
-            fields["date"] = FieldResult(
-                value=normalize_date(
-                    date_match.group(1)
-                ),
-                confidence=fields["date"].confidence,
-                raw_text=fields["date"].raw_text,
-            )
-        else:
-            fields["date"] = FieldResult()
-
     if not fields["date"].value:
+
         fields["date"] = _extract_pattern(
             "date",
             full_text,
         )
 
     # =========================================================================
-    # 7. PHONE
+    # 8. PHONE FALLBACK
     # =========================================================================
 
     if fields["phone"].value:
+
         phone_match = PHONE_RE.search(
             fields["phone"].value
         )
 
         if phone_match:
+
             fields["phone"] = FieldResult(
                 value=normalize_phone(
                     phone_match.group(0)
@@ -1503,20 +1816,36 @@ def extract_from_full_text(
                 confidence=fields["phone"].confidence,
                 raw_text=fields["phone"].raw_text,
             )
+
         else:
+
             fields["phone"] = FieldResult()
 
     if not fields["phone"].value:
+
         fields["phone"] = _extract_pattern(
             "phone",
             full_text,
         )
 
     # =========================================================================
-    # 8. COUNTERPARTY FALLBACK
+    # 9. COUNTERPARTY FALLBACK
+    #
+    # Только если label "Контрагент" не дал нормальное значение.
     # =========================================================================
 
-    if not fields["counterparty"].value:
+    if fields["counterparty"].value:
+
+        fields["counterparty"] = FieldResult(
+            value=normalize_counterparty(
+                fields["counterparty"].value
+            ),
+            confidence=fields["counterparty"].confidence,
+            raw_text=fields["counterparty"].raw_text,
+        )
+
+    else:
+
         fields["counterparty"] = (
             _extract_counterparty_fallback(
                 tokens
@@ -1524,18 +1853,27 @@ def extract_from_full_text(
         )
 
     # =========================================================================
-    # 9. MANAGER FALLBACK
+    # 10. MANAGER
+    #
+    # НИКАКИХ:
+    #
+    #     Татьяна
+    #     известные имена
+    #     ближайший человек
+    #
+    # Только:
+    #
+    #     Автор: ... Редактор:
     # =========================================================================
 
-    if not fields["manager"].value:
-        fields["manager"] = (
-            _extract_manager_fallback(
-                tokens
-            )
+    fields["manager"] = (
+        _extract_manager_from_author(
+            tokens
         )
+    )
 
     # =========================================================================
-    # 10. LOG
+    # 11. DEBUG
     # =========================================================================
 
     logger.info(
