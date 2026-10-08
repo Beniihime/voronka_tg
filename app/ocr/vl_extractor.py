@@ -475,7 +475,11 @@ class PaddleOCRVLExtractor:
             image_path,
         )
 
+        logger.info("PaddleOCR-VL model loadeиd. Starting predict()")
+
         results = pipeline.predict(str(image_path))
+
+        logger.info("PaddleOCR-VL predict() completed")
 
         if not results:
             raise RuntimeError("PaddleOCR-VL returned no results.")
